@@ -1,0 +1,52 @@
+
+name: Build vsftpd for JCO4032
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc g++ make \
+            cpio rsync bc file wget \
+            unzip python3 perl \
+            libncurses-dev
+
+      - name: Fetch Buildroot
+        run: |
+          git clone --depth 1 \
+            https://github.com/buildroot/buildroot.git buildroot
+
+      - name: Check vsftpd package availability
+        run: |
+          test -f buildroot/package/vsftpd/vsftpd.mk
+          cat buildroot/package/vsftpd/vsftpd.mk
+
+      - name: Prepare build configuration
+        run: |
+          cd buildroot
+          make qemu_mipsel_malta_defconfig
+          grep -E \
+            'BR2_(mipsel|TOOLCHAIN_BUILDROOT_UCLIBC|PACKAGE_VSFTPD)' \
+            .config || true
+
+      - name: Save diagnostic configuration
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: buildroot/.config
+          if-no-files-found: ignore
