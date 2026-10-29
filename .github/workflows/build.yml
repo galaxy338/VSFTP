@@ -1,5 +1,5 @@
 
-name: Build static vsftpd for JioFiber JCO4032
+name: Build vsftpd for JioFiber JCO4032
 
 on:
   workflow_dispatch:
@@ -20,21 +20,19 @@ jobs:
             build-essential gcc g++ make \
             git wget cpio rsync bc file \
             unzip python3 perl \
-            libncurses-dev \
-            python3-setuptools
+            libncurses-dev
 
       - name: Download Buildroot
         run: |
           git clone --depth 1 \
             https://github.com/buildroot/buildroot.git buildroot
 
-      - name: Select a MIPS little-endian configuration
+      - name: Select MIPS little-endian configuration
         working-directory: buildroot
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Available MIPS configurations:"
           find configs -maxdepth 1 -type f \
             -iname '*mips*' -printf '%f\n' | sort
 
@@ -52,109 +50,98 @@ jobs:
           done
 
           if [ -z "$CONFIG" ]; then
-            echo "::error::No supported MIPS little-endian Malta defconfig found."
-            echo "Check the configuration list above."
+            echo "::error::No supported MIPS little-endian configuration found."
             exit 1
           fi
 
-          echo "Selected: $CONFIG"
+          echo "Using $CONFIG"
           make "$CONFIG"
 
-      - name: Enable static linking and vsftpd
+      - name: Configure static toolchain and vsftpd
         working-directory: buildroot
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -f package/vsftpd/vsftpd.mk ]; then
-            echo "::error::Buildroot does not contain the vsftpd package."
+          test -f package/vsftpd/vsftpd.mk || {
+            echo "::error::Buildroot vsftpd package not found."
             exit 1
-          fi
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".config")
-          config = path.read_text().splitlines()
-
-          options = {
-              "BR2_STATIC_LIBS": "y",
-              "BR2_PACKAGE_VSFTPD": "y",
-              "BR2_TARGET_ROOTFS_TAR": "y",
           }
 
-          for key, value in options.items():
-              config = [
-                  line for line in config
-                  if not line.startswith(key + "=")
-                  and line != f"# {key} is not set"
-              ]
-              config.append(f"{key}={value}")
+          test -x utils/config || {
+            echo "::error::Buildroot configuration utility not found."
+            exit 1
+          }
 
-          path.write_text("\n".join(config) + "\n")
-          PY
+          # Select static libraries using Buildroot's Kconfig utility.
+          utils/config --file .config --enable BR2_STATIC_LIBS
+          utils/config --file .config --enable BR2_PACKAGE_VSFTPD
+          utils/config --file .config --enable BR2_TARGET_ROOTFS_TAR
 
           make olddefconfig
 
-          echo "=== Effective configuration ==="
+          echo "=== Effective settings ==="
           grep -E \
-            '^(BR2_(mips|MIPS|STATIC_LIBS|PACKAGE_VSFTPD|TARGET_ROOTFS_TAR))=' \
+            '^(BR2_STATIC_LIBS|BR2_SHARED_LIBS|BR2_PACKAGE_VSFTPD|BR2_TARGET_ROOTFS_TAR)=|^# BR2_(STATIC|SHARED)_LIBS is not set' \
             .config || true
 
           if ! grep -qx 'BR2_PACKAGE_VSFTPD=y' .config; then
-            echo "::error::vsftpd was not enabled by Kconfig."
+            echo "::error::vsftpd is not enabled."
             exit 1
           fi
 
           if ! grep -qx 'BR2_STATIC_LIBS=y' .config; then
-            echo "::error::Static linking was not enabled."
+            echo "::error::Static linking is unavailable or was rejected by this toolchain."
             exit 1
           fi
 
-      - name: Compile vsftpd
+      - name: Compile
         working-directory: buildroot
         run: |
           set -euo pipefail
           make -j"$(nproc)"
 
-      - name: Verify and package binary
+      - name: Locate and verify binary
         working-directory: buildroot
         shell: bash
         run: |
           set -euo pipefail
 
-          BIN="output/target/usr/sbin/vsftpd"
+          BIN="$(find output/target -type f \
+            \( -name vsftpd -o -name 'vsftpd*' \) \
+            -path '*/sbin/*' -print -quit)"
 
-          if [ ! -f "$BIN" ]; then
-            echo "::error::vsftpd binary was not found at $BIN"
-            find output/target -type f -name '*vsftpd*' -print || true
+          if [ -z "$BIN" ]; then
+            echo "::error::vsftpd executable not found."
+            find output/target -iname '*vsftpd*' -print || true
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$BIN" "$GITHUB_WORKSPACE/dist/vsftpd"
-
-          {
-            echo "Target: MIPS little-endian"
-            echo "Purpose: standalone FTP server for router testing"
-            echo "Build: Buildroot static-library configuration"
-            echo
-            echo "Compatibility is not guaranteed. Verify on the router"
-            echo "before configuring or exposing the service."
-          } > "$GITHUB_WORKSPACE/dist/README.txt"
+          install -m 755 "$BIN" "$GITHUB_WORKSPACE/dist/vsftpd"
 
           file "$GITHUB_WORKSPACE/dist/vsftpd"
 
           if readelf -l "$GITHUB_WORKSPACE/dist/vsftpd" \
             | grep -q 'INTERP'; then
-            echo "::warning::Binary has a dynamic interpreter."
+            echo "::warning::Binary uses a dynamic interpreter."
           else
             echo "No dynamic interpreter detected."
           fi
 
+          cat > "$GITHUB_WORKSPACE/dist/README.txt" <<'EOF'
+          Target: MIPS little-endian
+          Purpose: FTP server testing on a compatible router.
+
+          Compatibility with the JCO4032 CPU ABI, kernel and uClibc
+          version is not guaranteed. Test architecture and runtime
+          compatibility before deployment. Do not expose FTP to the
+          public internet without appropriate security controls.
+          EOF
+
           ls -lh "$GITHUB_WORKSPACE/dist"
 
-      - name: Upload compiled binary
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vsftpd-jco4032-mipsel
