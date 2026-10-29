@@ -86,12 +86,13 @@ jobs:
           grep -E \
             '^(BR2_mips|BR2_MIPS|BR2_TOOLCHAIN_BUILDROOT|BR2_TOOLCHAIN_USES_GLIBC|BR2_TOOLCHAIN_USES_UCLIBC|BR2_STATIC_LIBS|BR2_SHARED_LIBS|BR2_PACKAGE_VSFTPD)=' \
             .config || true
-
-      - name: Compile vsftpd
+            
+      - name: Compile with visible progress
         working-directory: buildroot
+        shell: bash
         run: |
           set -euo pipefail
-          make -j"$(nproc)"
+          make V=1 -j2 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       - name: Package binary and diagnostics
         working-directory: buildroot
