@@ -33,6 +33,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Available MIPS configurations:"
           find configs -maxdepth 1 -type f \
             -iname '*mips*' -printf '%f\n' | sort
 
@@ -57,7 +58,7 @@ jobs:
           echo "Using $CONFIG"
           make "$CONFIG"
 
-      - name: Configure static toolchain and vsftpd
+      - name: Configure vsftpd
         working-directory: buildroot
         shell: bash
         run: |
@@ -68,48 +69,38 @@ jobs:
             exit 1
           }
 
-          test -x utils/config || {
-            echo "::error::Buildroot configuration utility not found."
-            exit 1
-          }
+          utils/config --file .config \
+            --enable BR2_PACKAGE_VSFTPD
 
-          # Select static libraries using Buildroot's Kconfig utility.
-          utils/config --file .config --enable BR2_STATIC_LIBS
-          utils/config --file .config --enable BR2_PACKAGE_VSFTPD
-          utils/config --file .config --enable BR2_TARGET_ROOTFS_TAR
+          utils/config --file .config \
+            --enable BR2_TARGET_ROOTFS_TAR
 
           make olddefconfig
 
-          echo "=== Effective settings ==="
+          if ! grep -qx 'BR2_PACKAGE_VSFTPD=y' .config; then
+            echo "::error::vsftpd was not enabled."
+            exit 1
+          fi
+
+          echo "=== Toolchain configuration ==="
           grep -E \
-            '^(BR2_STATIC_LIBS|BR2_SHARED_LIBS|BR2_PACKAGE_VSFTPD|BR2_TARGET_ROOTFS_TAR)=|^# BR2_(STATIC|SHARED)_LIBS is not set' \
+            '^(BR2_mips|BR2_MIPS|BR2_TOOLCHAIN_BUILDROOT|BR2_TOOLCHAIN_USES_GLIBC|BR2_TOOLCHAIN_USES_UCLIBC|BR2_STATIC_LIBS|BR2_SHARED_LIBS|BR2_PACKAGE_VSFTPD)=' \
             .config || true
 
-          if ! grep -qx 'BR2_PACKAGE_VSFTPD=y' .config; then
-            echo "::error::vsftpd is not enabled."
-            exit 1
-          fi
-
-          if ! grep -qx 'BR2_STATIC_LIBS=y' .config; then
-            echo "::error::Static linking is unavailable or was rejected by this toolchain."
-            exit 1
-          fi
-
-      - name: Compile
+      - name: Compile vsftpd
         working-directory: buildroot
         run: |
           set -euo pipefail
           make -j"$(nproc)"
 
-      - name: Locate and verify binary
+      - name: Package binary and diagnostics
         working-directory: buildroot
         shell: bash
         run: |
           set -euo pipefail
 
           BIN="$(find output/target -type f \
-            \( -name vsftpd -o -name 'vsftpd*' \) \
-            -path '*/sbin/*' -print -quit)"
+            -name vsftpd -path '*/sbin/*' -print -quit)"
 
           if [ -z "$BIN" ]; then
             echo "::error::vsftpd executable not found."
@@ -120,28 +111,42 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           install -m 755 "$BIN" "$GITHUB_WORKSPACE/dist/vsftpd"
 
-          file "$GITHUB_WORKSPACE/dist/vsftpd"
+          {
+            echo "=== Binary format ==="
+            file "$GITHUB_WORKSPACE/dist/vsftpd"
 
-          if readelf -l "$GITHUB_WORKSPACE/dist/vsftpd" \
-            | grep -q 'INTERP'; then
-            echo "::warning::Binary uses a dynamic interpreter."
-          else
-            echo "No dynamic interpreter detected."
-          fi
+            echo
+            echo "=== ELF header ==="
+            readelf -h "$GITHUB_WORKSPACE/dist/vsftpd" || true
+
+            echo
+            echo "=== Program interpreter ==="
+            readelf -l "$GITHUB_WORKSPACE/dist/vsftpd" \
+              | grep -E 'INTERP|Requesting program interpreter' || true
+
+            echo
+            echo "=== Shared library requirements ==="
+            readelf -d "$GITHUB_WORKSPACE/dist/vsftpd" \
+              | grep NEEDED || true
+
+            echo
+            echo "=== File size ==="
+            ls -lh "$GITHUB_WORKSPACE/dist/vsftpd"
+          } > "$GITHUB_WORKSPACE/dist/diagnostics.txt" 2>&1
+
+          cat "$GITHUB_WORKSPACE/dist/diagnostics.txt"
 
           cat > "$GITHUB_WORKSPACE/dist/README.txt" <<'EOF'
-          Target: MIPS little-endian
-          Purpose: FTP server testing on a compatible router.
+          Target: MIPS little-endian.
+          Build: Buildroot dynamically linked configuration.
 
-          Compatibility with the JCO4032 CPU ABI, kernel and uClibc
-          version is not guaranteed. Test architecture and runtime
-          compatibility before deployment. Do not expose FTP to the
-          public internet without appropriate security controls.
+          This is a diagnostic build, not a confirmed JCO4032-compatible
+          executable. The router uses an older uClibc runtime. Check the
+          ELF architecture, interpreter and required libraries before
+          attempting to execute the binary on the router.
           EOF
 
-          ls -lh "$GITHUB_WORKSPACE/dist"
-
-      - name: Upload artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: vsftpd-jco4032-mipsel
