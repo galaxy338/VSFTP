@@ -1,5 +1,5 @@
 
-name: Build vsftpd for JCO4032
+name: Build static vsftpd for JioFiber JCO4032
 
 on:
   workflow_dispatch:
@@ -13,40 +13,151 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential gcc g++ make \
-            cpio rsync bc file wget \
+            git wget cpio rsync bc file \
             unzip python3 perl \
-            libncurses-dev
+            libncurses-dev \
+            python3-setuptools
 
-      - name: Fetch Buildroot
+      - name: Download Buildroot
         run: |
           git clone --depth 1 \
             https://github.com/buildroot/buildroot.git buildroot
 
-      - name: Check vsftpd package availability
+      - name: Select a MIPS little-endian configuration
+        working-directory: buildroot
+        shell: bash
         run: |
-          test -f buildroot/package/vsftpd/vsftpd.mk
-          cat buildroot/package/vsftpd/vsftpd.mk
+          set -euo pipefail
 
-      - name: Prepare build configuration
+          echo "Available MIPS configurations:"
+          find configs -maxdepth 1 -type f \
+            -iname '*mips*' -printf '%f\n' | sort
+
+          CONFIG=""
+
+          for candidate in \
+            qemu_mips32r2el_malta_defconfig \
+            qemu_mipsel_malta_defconfig \
+            qemu_mips32el_malta_defconfig
+          do
+            if [ -f "configs/$candidate" ]; then
+              CONFIG="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$CONFIG" ]; then
+            echo "::error::No supported MIPS little-endian Malta defconfig found."
+            echo "Check the configuration list above."
+            exit 1
+          fi
+
+          echo "Selected: $CONFIG"
+          make "$CONFIG"
+
+      - name: Enable static linking and vsftpd
+        working-directory: buildroot
+        shell: bash
         run: |
-          cd buildroot
-          make qemu_mipsel_malta_defconfig
+          set -euo pipefail
+
+          if [ ! -f package/vsftpd/vsftpd.mk ]; then
+            echo "::error::Buildroot does not contain the vsftpd package."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".config")
+          config = path.read_text().splitlines()
+
+          options = {
+              "BR2_STATIC_LIBS": "y",
+              "BR2_PACKAGE_VSFTPD": "y",
+              "BR2_TARGET_ROOTFS_TAR": "y",
+          }
+
+          for key, value in options.items():
+              config = [
+                  line for line in config
+                  if not line.startswith(key + "=")
+                  and line != f"# {key} is not set"
+              ]
+              config.append(f"{key}={value}")
+
+          path.write_text("\n".join(config) + "\n")
+          PY
+
+          make olddefconfig
+
+          echo "=== Effective configuration ==="
           grep -E \
-            'BR2_(mipsel|TOOLCHAIN_BUILDROOT_UCLIBC|PACKAGE_VSFTPD)' \
+            '^(BR2_(mips|MIPS|STATIC_LIBS|PACKAGE_VSFTPD|TARGET_ROOTFS_TAR))=' \
             .config || true
 
-      - name: Save diagnostic configuration
-        if: always()
+          if ! grep -qx 'BR2_PACKAGE_VSFTPD=y' .config; then
+            echo "::error::vsftpd was not enabled by Kconfig."
+            exit 1
+          fi
+
+          if ! grep -qx 'BR2_STATIC_LIBS=y' .config; then
+            echo "::error::Static linking was not enabled."
+            exit 1
+          fi
+
+      - name: Compile vsftpd
+        working-directory: buildroot
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+
+      - name: Verify and package binary
+        working-directory: buildroot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN="output/target/usr/sbin/vsftpd"
+
+          if [ ! -f "$BIN" ]; then
+            echo "::error::vsftpd binary was not found at $BIN"
+            find output/target -type f -name '*vsftpd*' -print || true
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$BIN" "$GITHUB_WORKSPACE/dist/vsftpd"
+
+          {
+            echo "Target: MIPS little-endian"
+            echo "Purpose: standalone FTP server for router testing"
+            echo "Build: Buildroot static-library configuration"
+            echo
+            echo "Compatibility is not guaranteed. Verify on the router"
+            echo "before configuring or exposing the service."
+          } > "$GITHUB_WORKSPACE/dist/README.txt"
+
+          file "$GITHUB_WORKSPACE/dist/vsftpd"
+
+          if readelf -l "$GITHUB_WORKSPACE/dist/vsftpd" \
+            | grep -q 'INTERP'; then
+            echo "::warning::Binary has a dynamic interpreter."
+          else
+            echo "No dynamic interpreter detected."
+          fi
+
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload compiled binary
         uses: actions/upload-artifact@v4
         with:
-          name: build-diagnostics
-          path: buildroot/.config
-          if-no-files-found: ignore
+          name: vsftpd-jco4032-mipsel
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
