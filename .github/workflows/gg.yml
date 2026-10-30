@@ -1,5 +1,5 @@
 
-name: Build Samba for JCO4032
+name: Build Samba for JCO4032 2
 
 on:
   workflow_dispatch:
