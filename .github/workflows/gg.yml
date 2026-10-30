@@ -117,6 +117,7 @@ jobs:
           echo "Large-file support verified: off_t is 64-bit"
 
      
+     
       - name: Configure Samba
         working-directory: samba-4.19.8
         env:
@@ -127,11 +128,32 @@ jobs:
 
           export PATH="$(dirname "$CC"):$PATH"
 
-          export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
-          export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          # Target: Econet EN7528 / MIPS 1004Kc
+          # MIPS32r2, little-endian, O32
+          export CFLAGS="-Os -pipe -march=1004kc -mabi=32 -EL --sysroot=$SYSROOT -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export CPPFLAGS="--sysroot=$SYSROOT -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
           export LDFLAGS="--sysroot=$SYSROOT"
 
+          # Host-side tools
+          export PYTHON=/usr/bin/python3
+          export PYTHON_CONFIG=/usr/bin/python3-config
+
+          # Target dependency discovery
+          export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+          export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/lib/pkgconfig"
+
           qemu-mipsel --version
+          "$CC" -v
+
+          # zlib is mandatory in Samba 4.19.8.
+          # Fail here with a clear error if its target development files
+          # have not been installed into the sysroot.
+          pkg-config --exists 'zlib >= 1.2.3' || {
+            echo "::error::Target zlib development files missing from sysroot"
+            exit 1
+          }
+
+          pkg-config --modversion zlib
 
           ./configure \
             --cross-compile \
@@ -151,11 +173,13 @@ jobs:
             --with-modulesdir=/flash2/samba/lib \
             --with-privatelibdir=/flash2/samba/lib/private \
             --without-ad-dc \
+            --disable-python \
             --without-ads \
             --without-ldap \
             --without-pam \
             --without-acl-support \
             --bundled-libraries=ALL
+
 
       - name: Compile Samba
         working-directory: samba-4.19.8
