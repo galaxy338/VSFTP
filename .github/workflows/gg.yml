@@ -118,6 +118,43 @@ jobs:
 
      
      
+      - name: Build target zlib
+        env:
+          CC: ${{ steps.compiler.outputs.cc }}
+          SYSROOT: ${{ steps.compiler.outputs.sysroot }}
+        run: |
+          set -eux
+
+          TOOLBIN="$(dirname "$CC")"
+          CROSS_PREFIX="$(basename "$CC")"
+          CROSS_PREFIX="${CROSS_PREFIX%-gcc}"
+
+          export PATH="$TOOLBIN:$PATH"
+          export CHOST="$CROSS_PREFIX"
+          export CC="$CROSS_PREFIX-gcc"
+          export CFLAGS="-Os -pipe -march=1004kc -mabi=32 -EL --sysroot=$SYSROOT -D_FILE_OFFSET_BITS=64"
+
+          cd "$RUNNER_TEMP"
+
+          wget -q \
+            https://zlib.net/fossils/zlib-1.3.1.tar.gz \
+            -O zlib.tar.gz
+
+          tar -xzf zlib.tar.gz
+          cd zlib-1.3.1
+
+          ./configure --prefix=/usr --static
+
+          make -j2
+          make install DESTDIR="$SYSROOT"
+
+          test -f "$SYSROOT/usr/include/zlib.h"
+          test -f "$SYSROOT/usr/lib/libz.a"
+          test -f "$SYSROOT/usr/lib/pkgconfig/zlib.pc"
+
+          file "$SYSROOT/usr/lib/libz.a"
+          cat "$SYSROOT/usr/lib/pkgconfig/zlib.pc"
+
       - name: Configure Samba
         working-directory: samba-4.19.8
         env:
