@@ -7,31 +7,45 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install deps
+      - name: Setup MIPS multiarch and cross-tools
         run: |
+          sudo dpkg --add-architecture mipsel
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-mipsel-linux-gnu libxml2-dev
+          sudo apt-get install -y \
+            gcc-mipsel-linux-gnu \
+            libxml2-dev:mipsel \
+            libsqlite3-dev:mipsel \
+            uuid-dev:mipsel
 
       - name: Download lighttpd 1.4.26
         run: |
           wget -q https://download.lighttpd.net/lighttpd/releases-1.4.x/lighttpd-1.4.26.tar.bz2
           tar xjf lighttpd-1.4.26.tar.bz2
 
-      - name: Compile mod_webdav.so
+      - name: Compile mod_webdav.so with MIPS libxml2/sqlite3/uuid
         run: |
           SRC=lighttpd-1.4.26/src
           sed -i 's/typedef int socklen_t;//' $SRC/base.h
+
+          # MIPS sysroot libs are in /usr/mipsel-linux-gnu
+          MIPS_INC=/usr/mipsel-linux-gnu/include
+          MIPS_LIB=/usr/mipsel-linux-gnu/lib
+
           mipsel-linux-gnu-gcc \
             -march=mips32r2 -mabi=32 -EL \
             -O2 -fPIC -shared -nostartfiles \
             -DLIGHTTPD_VERSION_ID=66586 \
             -DHAVE_LIBXML2=1 -DHAVE_SQLITE=1 -DHAVE_UUID=1 \
-            -I $SRC -I /usr/include/libxml2 \
+            -I $SRC \
+            -I $MIPS_INC \
+            -I $MIPS_INC/libxml2 \
+            -L $MIPS_LIB \
             -Wl,--allow-shlib-undefined \
-            -Wl,--unresolved-symbols=ignore-all \
             -Wl,-soname,mod_webdav.so \
             -o mod_webdav.so \
-            $SRC/mod_webdav.c 2>&1
+            $SRC/mod_webdav.c \
+            -lxml2 -lsqlite3 -luuid 2>&1
+
           file mod_webdav.so
           ls -la mod_webdav.so
 
