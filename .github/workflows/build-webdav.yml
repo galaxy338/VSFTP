@@ -1,0 +1,47 @@
+name: Build mod_webdav for MIPS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install MIPS cross-toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-mipsel-linux-gnu libxml2-dev
+
+      - name: Download lighttpd 1.4.26 source
+        run: |
+          wget -q https://download.lighttpd.net/lighttpd/releases-1.4.x/lighttpd-1.4.26.tar.bz2
+          tar xjf lighttpd-1.4.26.tar.bz2
+
+      - name: Download MIPS libxml2 (uClibc sysroot)
+        run: |
+          wget -q https://toolchains.bootlin.com/downloads/releases/toolchains/mips32el/tarballs/mips32el--uclibc--stable-2018.11-1.tar.bz2
+          mkdir sysroot
+          tar xjf mips32el--uclibc--stable-2018.11-1.tar.bz2 -C sysroot
+          SYSROOT=sysroot/mips32el--uclibc--stable-2018.11-1
+          echo "SYSROOT=" >> $GITHUB_ENV
+
+      - name: Compile mod_webdav.so
+        run: |
+          CC=mipsel-linux-gnu-gcc
+          SRC=lighttpd-1.4.26/src
+          SYSROOT="${{ env.SYSROOT }}"
+
+          # We compile against the system libxml2 headers but link with -nostdlib
+          # The .so only needs lighttpd internal symbols (resolved at dlopen time)
+          # and libxml2/libsqlite3/libuuid (present on router)
+          $CC             -march=mips32r2 -mabi=32 -EL             -O2 -fPIC -shared             -nostartfiles             -I $SRC             -I /usr/include/libxml2             -Wl,--allow-shlib-undefined             -Wl,-soname,mod_webdav.so             -o mod_webdav.so             $SRC/mod_webdav.c             -lxml2 -lsqlite3 -luuid             2>&1
+          
+          file mod_webdav.so
+          ls -la mod_webdav.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod_webdav_mipsel
+          path: mod_webdav.so
+          retention-days: 7
