@@ -98,32 +98,31 @@ jobs:
         working-directory: samba-4.19.8
         env:
           CC: ${{ steps.compiler.outputs.cc }}
-          CROSS_COMPILE: ${{ steps.compiler.outputs.prefix }}
           SYSROOT: ${{ steps.compiler.outputs.sysroot }}
         run: |
           export PATH="$(dirname "$CC"):$PATH"
-
           export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL"
           export LDFLAGS="--sysroot=$SYSROOT"
 
-          qemu-mipsel --version
+          cat > cross-answers.txt <<'EOF'
+          Checking for program 'python3' : /usr/bin/python3
+          Checking for program 'python' : /usr/bin/python3
+          Checking for program 'git' : /usr/bin/git
+          EOF
 
           ./configure \
             --cross-compile \
-            --cross-execute="qemu-mipsel -L $SYSROOT" \
             --cross-answers=cross-answers.txt \
             --hostcc=gcc \
             --prefix=/flash2/samba \
             --without-ad-dc \
             --without-ads \
             --without-ldap \
-            --without-krb5 \
             --without-pam \
             --without-acl-support \
             --without-json \
             --disable-cups \
-            --bundled-libraries=ALL \
-            --private-libraries=talloc,tevent,tdb,ldb,replace
+            --bundled-libraries=ALL
 
       - name: Compile Samba
         working-directory: samba-4.19.8
