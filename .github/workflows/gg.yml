@@ -5,10 +5,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
+    name: Cross-compile Samba for MIPSLE
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -21,9 +22,9 @@ jobs:
             python3 \
             python3-dev \
             python3-setuptools \
-            python3-pyelftools \
             pkg-config \
-            flex bison \
+            flex \
+            bison \
             libacl1-dev \
             libattr1-dev \
             libcap-dev \
@@ -33,7 +34,9 @@ jobs:
             libpopt-dev \
             qemu-user \
             file \
-            patchelf
+            patchelf \
+            wget \
+            xz-utils
 
       - name: Cache MIPS toolchain
         id: toolchain-cache
@@ -42,20 +45,19 @@ jobs:
           path: ${{ runner.temp }}/mips-toolchain
           key: jco4032-mipsel-uclibc-2020-02-2
 
-      - name: Download MIPS uClibc toolchain
+      - name: Download MIPS toolchain
         if: steps.toolchain-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/mips-toolchain"
           cd "$RUNNER_TEMP/mips-toolchain"
 
-          wget -q --show-progress \
+          wget -q \
             https://toolchains.bootlin.com/downloads/releases/toolchains/mips32el/tarballs/mips32el--uclibc--stable-2020.02-2.tar.bz2 \
             -O toolchain.tar.bz2
 
           tar -xjf toolchain.tar.bz2
           rm toolchain.tar.bz2
-          
-      
+
       - name: Locate compiler
         id: compiler
         run: |
@@ -66,25 +68,21 @@ jobs:
             -print -quit)
 
           if [ -z "$CC" ] || [ ! -x "$CC" ]; then
-            echo "Compiler missing or not executable"
-            ls -la "$ROOT"/*/bin/
+            echo "MIPS compiler not found"
+            find "$ROOT" -name '*gcc'
             exit 1
           fi
 
-          PREFIX="${CC%gcc}"
           SYSROOT=$("$CC" -print-sysroot)
 
           echo "cc=$CC" >> "$GITHUB_OUTPUT"
-          echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
           echo "sysroot=$SYSROOT" >> "$GITHUB_OUTPUT"
 
-          echo "===== Compiler ====="
-          ls -l "$CC"
+          echo "Compiler:"
           "$CC" -dumpmachine
           "$CC" -v
 
-          echo "===== Sysroot ====="
-          echo "$SYSROOT"
+          echo "Sysroot: $SYSROOT"
 
       - name: Download Samba source
         run: |
@@ -94,20 +92,49 @@ jobs:
 
           tar -xzf samba.tar.gz
 
+      - name: Verify large-file support
+        env:
+          CC: ${{ steps.compiler.outputs.cc }}
+          SYSROOT: ${{ steps.compiler.outputs.sysroot }}
+        run: |
+          set -eux
+
+          export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+
+          cat > check-lfs.c <<'EOF'
+          #include <sys/types.h>
+          int main(void) {
+              return sizeof(off_t) < 8;
+          }
+          EOF
+
+          "$CC" $CFLAGS --sysroot="$SYSROOT" \
+            check-lfs.c -o check-lfs
+
+          qemu-mipsel -L "$SYSROOT" ./check-lfs
+
+          echo "Large-file support verified: off_t is 64-bit"
+
       - name: Configure Samba
         working-directory: samba-4.19.8
         env:
           CC: ${{ steps.compiler.outputs.cc }}
           SYSROOT: ${{ steps.compiler.outputs.sysroot }}
         run: |
+          set -eux
+
           export PATH="$(dirname "$CC"):$PATH"
-          export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL"
+
+          export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
           export LDFLAGS="--sysroot=$SYSROOT"
 
           cat > cross-answers.txt <<'EOF'
-          Checking for program 'python3' : /usr/bin/python3
-          Checking for program 'python' : /usr/bin/python3
-          Checking for program 'git' : /usr/bin/git
+          Checking uname sysname type: Linux
+          Checking uname machine type: mips
+          Checking uname release type: 3.18.21
+          Checking uname version type: JCO4032
           EOF
 
           ./configure \
@@ -115,37 +142,64 @@ jobs:
             --cross-answers=cross-answers.txt \
             --hostcc=gcc \
             --prefix=/flash2/samba \
+            --sysconfdir=/flash2/samba/etc \
+            --localstatedir=/flash2/samba/var \
+            --with-configdir=/flash2/samba/etc \
+            --with-privatedir=/flash2/samba/private \
+            --with-lockdir=/flash2/samba/lock \
+            --with-statedir=/flash2/samba/state \
+            --with-cachedir=/flash2/samba/cache \
+            --with-piddir=/flash2/samba/run \
+            --with-logfilebase=/flash2/samba/log \
+            --with-modulesdir=/flash2/samba/lib \
+            --with-privatelibdir=/flash2/samba/lib/private \
             --without-ad-dc \
             --without-ads \
             --without-ldap \
             --without-pam \
             --without-acl-support \
-            --without-json \
-            --disable-cups \
             --bundled-libraries=ALL
 
       - name: Compile Samba
         working-directory: samba-4.19.8
         env:
           CC: ${{ steps.compiler.outputs.cc }}
+          SYSROOT: ${{ steps.compiler.outputs.sysroot }}
         run: |
-          export PATH="$(dirname "$CC"):$PATH"
-          ./buildtools/bin/waf build --targets=smbd -j2
+          set -eux
 
-      - name: Package and inspect
+          export PATH="$(dirname "$CC"):$PATH"
+          export CFLAGS="-Os -pipe -march=34kc -mabi=32 -EL -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export LDFLAGS="--sysroot=$SYSROOT"
+
+          ./buildtools/bin/waf build \
+            --targets=smbd,smbpasswd,testparm \
+            -j2
+
+      - name: Install and package Samba
         working-directory: samba-4.19.8
         run: |
           set -eux
 
-          mkdir -p ../samba-jco4032/sbin
-          mkdir -p ../samba-jco4032/etc
+          STAGE="$GITHUB_WORKSPACE/stage"
 
-          SMB="$(find bin -type f -name smbd | head -1)"
-          test -n "$SMB"
+          mkdir -p "$STAGE"
 
-          cp "$SMB" ../samba-jco4032/sbin/smbd
+          ./buildtools/bin/waf install \
+            --destdir="$STAGE"
 
-          cat > ../samba-jco4032/etc/smb.conf <<'EOF'
+          SMB="$STAGE/flash2/samba/sbin/smbd"
+
+          if [ ! -f "$SMB" ]; then
+            echo "Installed smbd not found"
+            find "$STAGE" -name smbd
+            exit 1
+          fi
+
+          mkdir -p "$STAGE/flash2/samba/etc"
+
+          cat > "$STAGE/flash2/samba/etc/smb.conf" <<'EOF'
           [global]
           workgroup = WORKGROUP
           server string = JCO4032 NAS
@@ -173,25 +227,72 @@ jobs:
           directory mask = 0775
           EOF
 
-          echo "===== Binary ====="
-          file ../samba-jco4032/sbin/smbd
+          mkdir -p \
+            "$STAGE/flash2/samba/private" \
+            "$STAGE/flash2/samba/state" \
+            "$STAGE/flash2/samba/cache" \
+            "$STAGE/flash2/samba/lock" \
+            "$STAGE/flash2/samba/run" \
+            "$STAGE/flash2/samba/log"
+
+          echo "===== Samba binaries ====="
+          find "$STAGE" -type f \( \
+            -name smbd -o \
+            -name smbpasswd -o \
+            -name testparm \
+          \)
 
           echo "===== ELF interpreter ====="
-          readelf -l ../samba-jco4032/sbin/smbd | grep interpreter || true
+          readelf -l "$SMB" | grep interpreter || true
 
-          echo "===== Shared libraries ====="
-          readelf -d ../samba-jco4032/sbin/smbd | grep NEEDED || true
+          echo "===== Required libraries ====="
+          readelf -d "$SMB" | grep NEEDED || true
 
-          echo "===== Toolchain libc ====="
-          find "$SYSROOT" -name 'libc.so*' -o -name 'ld-uClibc.so*'
+          echo "===== Binary architecture ====="
+          file "$SMB"
 
-          tar -czf ../samba-jco4032.tar.gz ../samba-jco4032
+          cd "$GITHUB_WORKSPACE"
 
-          sha256sum ../samba-jco4032.tar.gz
+          tar -czf samba-jco4032.tar.gz -C stage .
+          sha256sum samba-jco4032.tar.gz \
+            > samba-jco4032.tar.gz.sha256
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          ls -lh samba-jco4032.tar.gz*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: samba-jco4032
-          path: samba-jco4032.tar.gz
-          retention-days: 14
+          tag_name: samba-jco4032-4.19.8-build-${{ github.run_number }}
+          name: Samba 4.19.8 - JCO4032 Build ${{ github.run_number }}
+          body: |
+            ## Samba for JioFiber JCO4032
+
+            Experimental MIPS little-endian cross-compilation build.
+
+            Target:
+            - MIPS32 Release 2
+            - Little-endian
+            - O32 ABI
+            - uClibc toolchain
+
+            Features:
+            - SMB2 and SMB3 configuration
+            - Crucial SSD share configuration
+            - Read/write share configuration
+
+            IMPORTANT:
+            This is an experimental build using a newer uClibc
+            toolchain than the router's installed uClibc 0.9.33.2.
+
+            It is NOT confirmed compatible with the router firmware.
+            Inspect the ELF interpreter and dependencies before use.
+
+            Do not overwrite firmware libraries.
+          files: |
+            samba-jco4032.tar.gz
+            samba-jco4032.tar.gz.sha256
+          draft: false
+          prerelease: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
