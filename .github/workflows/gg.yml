@@ -155,6 +155,160 @@ jobs:
           file "$SYSROOT/usr/lib/libz.a"
           cat "$SYSROOT/usr/lib/pkgconfig/zlib.pc"
 
+      
+      - name: Build target GnuTLS dependency chain
+        env:
+          CC: ${{ steps.compiler.outputs.cc }}
+          SYSROOT: ${{ steps.compiler.outputs.sysroot }}
+        run: |
+          set -eux
+
+          TOOLBIN="$(dirname "$CC")"
+          TARGET="$("$CC" -dumpmachine)"
+
+          export PATH="$TOOLBIN:$PATH"
+          export CC="${TARGET}-gcc"
+          export AR="${TARGET}-ar"
+          export AS="${TARGET}-as"
+          export LD="${TARGET}-ld"
+          export NM="${TARGET}-nm"
+          export RANLIB="${TARGET}-ranlib"
+          export STRIP="${TARGET}-strip"
+
+          export CFLAGS="-Os -pipe -march=1004kc -mabi=32 -EL --sysroot=$SYSROOT -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
+          export CPPFLAGS="--sysroot=$SYSROOT -D_FILE_OFFSET_BITS=64"
+          export LDFLAGS="--sysroot=$SYSROOT"
+
+          export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+          export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/lib/pkgconfig"
+
+          BUILD="$(gcc -dumpmachine)"
+
+          cd "$RUNNER_TEMP"
+
+          # --------------------------------------------------
+          # GMP 6.2.1
+          # --------------------------------------------------
+
+          wget -q \
+            https://ftp.gnu.org/gnu/gmp/gmp-6.2.1.tar.xz \
+            -O gmp.tar.xz
+
+          tar -xf gmp.tar.xz
+          cd gmp-6.2.1
+
+          ./configure \
+            --build="$BUILD" \
+            --host="$TARGET" \
+            --prefix=/usr \
+            --enable-shared \
+            --enable-static
+
+          make -j2
+          make install DESTDIR="$SYSROOT"
+
+          cd "$RUNNER_TEMP"
+
+          # --------------------------------------------------
+          # Nettle 3.6
+          # --------------------------------------------------
+
+          wget -q \
+            https://ftp.gnu.org/gnu/nettle/nettle-3.6.tar.gz \
+            -O nettle.tar.gz
+
+          tar -xzf nettle.tar.gz
+          cd nettle-3.6
+
+          export GMP_CFLAGS="-I$SYSROOT/usr/include"
+          export GMP_LIBS="-L$SYSROOT/usr/lib -lgmp"
+
+          ./configure \
+            --build="$BUILD" \
+            --host="$TARGET" \
+            --prefix=/usr \
+            --enable-shared \
+            --enable-static \
+            --disable-openssl
+
+          make -j2
+          make install DESTDIR="$SYSROOT"
+
+          cd "$RUNNER_TEMP"
+
+          # --------------------------------------------------
+          # GnuTLS 3.6.16
+          # --------------------------------------------------
+
+          wget -q \
+            https://gnupg.org/ftp/gcrypt/gnutls/v3.6/gnutls-3.6.16.tar.xz \
+            -O gnutls.tar.xz
+
+          tar -xf gnutls.tar.xz
+          cd gnutls-3.6.16
+
+          export GMP_CFLAGS="-I$SYSROOT/usr/include"
+          export GMP_LIBS="-L$SYSROOT/usr/lib -lgmp"
+
+          export NETTLE_CFLAGS="-I$SYSROOT/usr/include"
+          export NETTLE_LIBS="-L$SYSROOT/usr/lib -lhogweed -lnettle"
+
+          ./configure \
+            --build="$BUILD" \
+            --host="$TARGET" \
+            --prefix=/usr \
+            --enable-shared \
+            --enable-static \
+            --disable-doc \
+            --disable-tools \
+            --disable-cxx \
+            --disable-tests \
+            --disable-valgrind-tests \
+            --disable-full-test-suite \
+            --disable-rpath \
+            --disable-libdane \
+            --with-included-unistring \
+            --without-zlib \
+            --without-libz-prefix \
+            --without-idn \
+            --without-libidn2 \
+            --without-tpm \
+            --without-p11-kit
+
+          make -j2
+          make install DESTDIR="$SYSROOT"
+
+          # --------------------------------------------------
+          # Verify target libraries and metadata
+          # --------------------------------------------------
+
+          echo "===== GnuTLS version ====="
+
+          pkg-config --modversion gnutls
+
+          test -f "$SYSROOT/usr/include/gnutls/gnutls.h"
+          test -f "$SYSROOT/usr/lib/pkgconfig/gnutls.pc"
+
+          echo "===== Target libraries ====="
+
+          find "$SYSROOT/usr/lib" -maxdepth 1 \
+            \( -name 'libgmp.so*' \
+            -o -name 'libnettle.so*' \
+            -o -name 'libhogweed.so*' \
+            -o -name 'libgnutls.so*' \) \
+            -print
+
+          echo "===== GnuTLS pkg-config ====="
+
+          pkg-config --cflags --libs gnutls
+
+          echo "===== GnuTLS static dependencies ====="
+
+          pkg-config --static --libs gnutls
+
+          echo "GnuTLS target dependency chain built."
+
+
       - name: Configure Samba
         working-directory: samba-4.19.8
         env:
