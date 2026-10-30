@@ -7,29 +7,47 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Setup MIPS multiarch and cross-tools
+      - name: Install cross-toolchain
         run: |
-          sudo dpkg --add-architecture mipsel
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            gcc-mipsel-linux-gnu \
-            libxml2-dev:mipsel \
-            libsqlite3-dev:mipsel \
-            uuid-dev:mipsel
+          sudo apt-get install -y gcc-mipsel-linux-gnu libxml2-dev
+
+      - name: Download MIPS libxml2 and libuuid from Debian
+        run: |
+          mkdir -p mips_sysroot/usr
+          # Debian bullseye mipsel packages
+          BASE=http://ftp.debian.org/debian/pool/main
+
+          # libxml2 dev + runtime for mipsel
+          wget -q ${BASE}/libx/libxml2/libxml2_2.9.10+dfsg-6.7+deb11u4_mipsel.deb
+          wget -q ${BASE}/libx/libxml2/libxml2-dev_2.9.10+dfsg-6.7+deb11u4_mipsel.deb
+          # libsqlite3 for mipsel  
+          wget -q ${BASE}/s/sqlite3/libsqlite3-0_3.34.1-3_mipsel.deb
+          wget -q ${BASE}/s/sqlite3/libsqlite3-dev_3.34.1-3_mipsel.deb
+          # libuuid for mipsel
+          wget -q ${BASE}/u/util-linux/libuuid1_2.36.1-8+deb11u1_mipsel.deb
+          wget -q ${BASE}/u/util-linux/uuid-dev_2.36.1-8+deb11u1_mipsel.deb
+
+          # Extract all debs into sysroot
+          for deb in *.deb; do
+            echo Extracting $deb
+            dpkg-deb -x $deb mips_sysroot/
+          done
+
+          echo '=== sysroot libs ==='
+          find mips_sysroot -name '*.so*' | head -20
+          find mips_sysroot -name 'libxml2.h' -o -name 'sqlite3.h' | head -10
 
       - name: Download lighttpd 1.4.26
         run: |
           wget -q https://download.lighttpd.net/lighttpd/releases-1.4.x/lighttpd-1.4.26.tar.bz2
           tar xjf lighttpd-1.4.26.tar.bz2
 
-      - name: Compile mod_webdav.so with MIPS libxml2/sqlite3/uuid
+      - name: Compile mod_webdav.so
         run: |
           SRC=lighttpd-1.4.26/src
+          SYSROOT=$(pwd)/mips_sysroot
           sed -i 's/typedef int socklen_t;//' $SRC/base.h
-
-          # MIPS sysroot libs are in /usr/mipsel-linux-gnu
-          MIPS_INC=/usr/mipsel-linux-gnu/include
-          MIPS_LIB=/usr/mipsel-linux-gnu/lib
 
           mipsel-linux-gnu-gcc \
             -march=mips32r2 -mabi=32 -EL \
@@ -37,9 +55,12 @@ jobs:
             -DLIGHTTPD_VERSION_ID=66586 \
             -DHAVE_LIBXML2=1 -DHAVE_SQLITE=1 -DHAVE_UUID=1 \
             -I $SRC \
-            -I $MIPS_INC \
-            -I $MIPS_INC/libxml2 \
-            -L $MIPS_LIB \
+            -I $SYSROOT/usr/include \
+            -I $SYSROOT/usr/include/libxml2 \
+            -L $SYSROOT/usr/lib/mipsel-linux-gnu \
+            -L $SYSROOT/lib/mipsel-linux-gnu \
+            -Wl,-rpath-link,$SYSROOT/usr/lib/mipsel-linux-gnu \
+            -Wl,-rpath-link,$SYSROOT/lib/mipsel-linux-gnu \
             -Wl,--allow-shlib-undefined \
             -Wl,-soname,mod_webdav.so \
             -o mod_webdav.so \
@@ -48,6 +69,8 @@ jobs:
 
           file mod_webdav.so
           ls -la mod_webdav.so
+          echo '=== needed libs ==='
+          mipsel-linux-gnu-readelf -d mod_webdav.so | grep NEEDED
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
