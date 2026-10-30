@@ -55,17 +55,19 @@ jobs:
           tar -xjf toolchain.tar.bz2
           rm toolchain.tar.bz2
           
+      
       - name: Locate compiler
         id: compiler
         run: |
           ROOT="$RUNNER_TEMP/mips-toolchain"
 
-          CC=$(find "$ROOT" -type f \
-            -name 'mipsel-buildroot-linux-uclibc-gcc' | head -1)
+          CC=$(find "$ROOT" \
+            -name 'mipsel-buildroot-linux-uclibc-gcc' \
+            -print -quit)
 
-          if [ -z "$CC" ]; then
-            echo "Compiler not found"
-            find "$ROOT" -name '*gcc'
+          if [ -z "$CC" ] || [ ! -x "$CC" ]; then
+            echo "Compiler missing or not executable"
+            ls -la "$ROOT"/*/bin/
             exit 1
           fi
 
@@ -76,10 +78,13 @@ jobs:
           echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
           echo "sysroot=$SYSROOT" >> "$GITHUB_OUTPUT"
 
-          echo "Compiler: $CC"
-          echo "Sysroot: $SYSROOT"
+          echo "===== Compiler ====="
+          ls -l "$CC"
           "$CC" -dumpmachine
           "$CC" -v
+
+          echo "===== Sysroot ====="
+          echo "$SYSROOT"
 
       - name: Download Samba source
         run: |
