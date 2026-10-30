@@ -21,15 +21,29 @@ jobs:
         run: |
           SRC=lighttpd-1.4.26/src
 
-          # Fix 1: remove the conflicting socklen_t typedef in base.h
+          # Fix: remove the conflicting socklen_t typedef
           sed -i 's/typedef int socklen_t;//' $SRC/base.h
 
-          # Fix 2: LIGHTTPD_VERSION_ID is in version.h - check its value
-          grep LIGHTTPD_VERSION_ID $SRC/version.h || true
-          cat $SRC/version.h
+          # LIGHTTPD_VERSION_ID = (1<<16 | 4<<8 | 26) = 66586
+          # Pass as -D to avoid needing config.h
+          mipsel-linux-gnu-gcc \
+            -march=mips32r2 -mabi=32 -EL \
+            -O2 -fPIC -shared \
+            -nostartfiles \
+            -DLIGHTTPD_VERSION_ID=66586 \
+            -DHAVE_LIBXML2=1 \
+            -DHAVE_SQLITE=1 \
+            -DHAVE_UUID=1 \
+            -I $SRC \
+            -I /usr/include/libxml2 \
+            -Wl,--allow-shlib-undefined \
+            -Wl,-soname,mod_webdav.so \
+            -o mod_webdav.so \
+            $SRC/mod_webdav.c \
+            -lxml2 -lsqlite3 -luuid \
+            2>&1
 
-          mipsel-linux-gnu-gcc             -march=mips32r2 -mabi=32 -EL             -O2 -fPIC -shared             -nostartfiles             -I $SRC             -I /usr/include/libxml2             -Wl,--allow-shlib-undefined             -Wl,-soname,mod_webdav.so             -o mod_webdav.so             $SRC/mod_webdav.c             -lxml2 -lsqlite3 -luuid             2>&1
-
+          echo "=== result ==="
           file mod_webdav.so
           ls -la mod_webdav.so
 
