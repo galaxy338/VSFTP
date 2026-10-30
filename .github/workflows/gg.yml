@@ -116,6 +116,7 @@ jobs:
 
           echo "Large-file support verified: off_t is 64-bit"
 
+     
       - name: Configure Samba
         working-directory: samba-4.19.8
         env:
@@ -130,15 +131,11 @@ jobs:
           export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE"
           export LDFLAGS="--sysroot=$SYSROOT"
 
-          cat > cross-answers.txt <<'EOF'
-          Checking uname sysname type: Linux
-          Checking uname machine type: mips
-          Checking uname release type: 3.18.21
-          Checking uname version type: JCO4032
-          EOF
+          qemu-mipsel --version
 
           ./configure \
             --cross-compile \
+            --cross-execute="qemu-mipsel -L $SYSROOT" \
             --cross-answers=cross-answers.txt \
             --hostcc=gcc \
             --prefix=/flash2/samba \
