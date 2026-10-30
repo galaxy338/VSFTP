@@ -1,5 +1,5 @@
 
-name: Build vsftpd for JioFiber JCO4032
+name: Build vsftpd for JCO4032 (MIPS uClibc)
 
 on:
   workflow_dispatch:
@@ -10,147 +10,113 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 30
 
     steps:
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential gcc g++ make \
-            git wget cpio rsync bc file \
-            unzip python3 perl \
-            libncurses-dev
+            build-essential wget bzip2 tar \
+            file binutils python3
 
-      - name: Download Buildroot
-        run: |
-          git clone --depth 1 \
-            https://github.com/buildroot/buildroot.git buildroot
-
-      - name: Select MIPS little-endian configuration
-        working-directory: buildroot
-        shell: bash
+      - name: Download MIPS uClibc toolchain
         run: |
           set -euo pipefail
 
-          echo "Available MIPS configurations:"
-          find configs -maxdepth 1 -type f \
-            -iname '*mips*' -printf '%f\n' | sort
+          wget -O toolchain.tar.bz2 \
+            https://toolchains.bootlin.com/downloads/releases/toolchains/mips32el/tarballs/mips32el--uclibc--stable-2020.02-2.tar.bz2
 
-          CONFIG=""
+          mkdir toolchain
+          tar -xjf toolchain.tar.bz2 -C toolchain
 
-          for candidate in \
-            qemu_mips32r2el_malta_defconfig \
-            qemu_mipsel_malta_defconfig \
-            qemu_mips32el_malta_defconfig
-          do
-            if [ -f "configs/$candidate" ]; then
-              CONFIG="$candidate"
-              break
-            fi
-          done
+          GCC="$(find "$PWD/toolchain" -type f \
+            -name '*-gcc' -print -quit)"
 
-          if [ -z "$CONFIG" ]; then
-            echo "::error::No supported MIPS little-endian configuration found."
+          if [ -z "$GCC" ]; then
+            echo "::error::Cross compiler not found."
             exit 1
           fi
 
-          echo "Using $CONFIG"
-          make "$CONFIG"
+          echo "CROSS_GCC=$GCC" >> "$GITHUB_ENV"
+          echo "Compiler: $GCC"
+          "$GCC" --version
 
-      - name: Configure vsftpd
-        working-directory: buildroot
+      - name: Download vsftpd source
+        run: |
+          set -euo pipefail
+
+          wget -O vsftpd.tar.gz \
+            https://security.appspot.com/downloads/vsftpd-3.0.5.tar.gz
+
+          tar -xzf vsftpd.tar.gz
+          test -d vsftpd-3.0.5
+
+      - name: Compile vsftpd
+        working-directory: vsftpd-3.0.5
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f package/vsftpd/vsftpd.mk || {
-            echo "::error::Buildroot vsftpd package not found."
-            exit 1
-          }
+          CC="$CROSS_GCC"
 
-          utils/config --file .config \
-            --enable BR2_PACKAGE_VSFTPD
+          echo "=== Compiler target ==="
+          "$CC" -dumpmachine
 
-          utils/config --file .config \
-            --enable BR2_TARGET_ROOTFS_TAR
+          echo "=== Compiler configuration ==="
+          "$CC" -print-sysroot
 
-          make olddefconfig
+          # Build for the router's 32-bit MIPS little-endian architecture.
+          # Override the dynamic loader to match the JCO4032.
+          make clean || true
 
-          if ! grep -qx 'BR2_PACKAGE_VSFTPD=y' .config; then
-            echo "::error::vsftpd was not enabled."
-            exit 1
-          fi
+          make -j2 \
+            CC="$CC" \
+            LINK="$CC" \
+            CFLAGS="-O2 -Wall -fPIE -D_FORTIFY_SOURCE=2" \
+            LDFLAGS="-pie -Wl,--dynamic-linker=/lib/ld-uClibc.so.0"
 
-          echo "=== Toolchain configuration ==="
-          grep -E \
-            '^(BR2_mips|BR2_MIPS|BR2_TOOLCHAIN_BUILDROOT|BR2_TOOLCHAIN_USES_GLIBC|BR2_TOOLCHAIN_USES_UCLIBC|BR2_STATIC_LIBS|BR2_SHARED_LIBS|BR2_PACKAGE_VSFTPD)=' \
-            .config || true
-            
-      - name: Compile with visible progress
-        working-directory: buildroot
-        shell: bash
-        run: |
-          set -euo pipefail
-          make V=1 -j2 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          test -f vsftpd
 
-      - name: Package binary and diagnostics
-        working-directory: buildroot
-        shell: bash
+      - name: Verify binary
         run: |
           set -euo pipefail
 
-          BIN="$(find output/target -type f \
-            -name vsftpd -path '*/sbin/*' -print -quit)"
-
-          if [ -z "$BIN" ]; then
-            echo "::error::vsftpd executable not found."
-            find output/target -iname '*vsftpd*' -print || true
-            exit 1
-          fi
-
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          install -m 755 "$BIN" "$GITHUB_WORKSPACE/dist/vsftpd"
+          mkdir -p dist
+          install -m 755 vsftpd-3.0.5/vsftpd dist/vsftpd
 
           {
-            echo "=== Binary format ==="
-            file "$GITHUB_WORKSPACE/dist/vsftpd"
+            echo "=== File format ==="
+            file dist/vsftpd
 
             echo
             echo "=== ELF header ==="
-            readelf -h "$GITHUB_WORKSPACE/dist/vsftpd" || true
+            readelf -h dist/vsftpd
 
             echo
-            echo "=== Program interpreter ==="
-            readelf -l "$GITHUB_WORKSPACE/dist/vsftpd" \
+            echo "=== Interpreter ==="
+            readelf -l dist/vsftpd \
               | grep -E 'INTERP|Requesting program interpreter' || true
 
             echo
-            echo "=== Shared library requirements ==="
-            readelf -d "$GITHUB_WORKSPACE/dist/vsftpd" \
-              | grep NEEDED || true
+            echo "=== Shared libraries ==="
+            readelf -d dist/vsftpd | grep NEEDED || true
 
             echo
-            echo "=== File size ==="
-            ls -lh "$GITHUB_WORKSPACE/dist/vsftpd"
-          } > "$GITHUB_WORKSPACE/dist/diagnostics.txt" 2>&1
+            echo "=== Size ==="
+            ls -lh dist/vsftpd
+          } > dist/diagnostics.txt 2>&1
 
-          cat "$GITHUB_WORKSPACE/dist/diagnostics.txt"
+          cat dist/diagnostics.txt
 
-          cat > "$GITHUB_WORKSPACE/dist/README.txt" <<'EOF'
-          Target: MIPS little-endian.
-          Build: Buildroot dynamically linked configuration.
+          if readelf -h dist/vsftpd | grep -q 'little endian'; then
+            echo "ELF endian check passed."
+          fi
 
-          This is a diagnostic build, not a confirmed JCO4032-compatible
-          executable. The router uses an older uClibc runtime. Check the
-          ELF architecture, interpreter and required libraries before
-          attempting to execute the binary on the router.
-          EOF
-
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vsftpd-jco4032-mipsel
+          name: vsftpd-jco4032-uclibc
           path: dist/
-          if-no-files-found: error
           retention-days: 7
+          if-no-files-found: error
