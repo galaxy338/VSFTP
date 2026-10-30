@@ -1,122 +1,104 @@
 
-name: Build vsftpd for JCO4032 (MIPS uClibc)
+name: Build JF-vsftpd for JF-mips32r2
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    name: Cross-compile vsftpd for MIPS32r2
+    runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Install dependencies
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download vsftpd 3.0.5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential wget bzip2 tar \
-            file binutils python3
-
-      - name: Download MIPS uClibc toolchain
-        run: |
-          set -euo pipefail
-
-          wget -O toolchain.tar.bz2 \
-            https://toolchains.bootlin.com/downloads/releases/toolchains/mips32el/tarballs/mips32el--uclibc--stable-2020.02-2.tar.bz2
-
-          mkdir toolchain
-          tar -xjf toolchain.tar.bz2 -C toolchain
-
-          GCC="$(find "$PWD/toolchain" -type f \
-            -name '*-gcc' -print -quit)"
-
-          if [ -z "$GCC" ]; then
-            echo "::error::Cross compiler not found."
-            exit 1
-          fi
-
-          echo "CROSS_GCC=$GCC" >> "$GITHUB_ENV"
-          echo "Compiler: $GCC"
-          "$GCC" --version
-
-      - name: Download vsftpd source
-        run: |
-          set -euo pipefail
-
           wget -O vsftpd.tar.gz \
             https://security.appspot.com/downloads/vsftpd-3.0.5.tar.gz
 
+          echo "26b602ae454b0ba6d99ef44a09b6b9e0dfa7f67228106736df1f278c70bc91d3  vsftpd.tar.gz" | sha256sum -c -
+
           tar -xzf vsftpd.tar.gz
-          test -d vsftpd-3.0.5
+          rm vsftpd.tar.gz
 
-      - name: Compile vsftpd
-        working-directory: vsftpd-3.0.5
-        shell: bash
+      - name: Download JF MIPS32r2 toolchain
         run: |
-          set -euo pipefail
+          wget -O toolchain.tar \
+            https://github.com/JFC-Group/JF-Buildroot/releases/download/2015.08.1/mipsel-buildroot-linux-uclibc-toolchain-2015.08.1.tar
 
-          CC="$CROSS_GCC"
+          tar -xf toolchain.tar
+          rm toolchain.tar
 
-          echo "=== Compiler target ==="
-          "$CC" -dumpmachine
+      - name: Set environment variables
+        run: |
+          TOOLCHAIN="$(pwd)/mipsel-buildroot-linux-uclibc-toolchain-2015.08.1"
 
-          echo "=== Compiler configuration ==="
-          "$CC" -print-sysroot
+          echo "$TOOLCHAIN/usr/bin" >> "$GITHUB_PATH"
 
-          # Build for the router's 32-bit MIPS little-endian architecture.
-          # Override the dynamic loader to match the JCO4032.
-          make clean || true
+          echo "LD_LIBRARY_PATH=$TOOLCHAIN/usr/lib" >> "$GITHUB_ENV"
 
-          make -j2 \
+          echo "CROSS_COMPILE=$TOOLCHAIN/usr/bin/mipsel-buildroot-linux-uclibc-" >> "$GITHUB_ENV"
+
+          echo "CC=$TOOLCHAIN/usr/bin/mipsel-buildroot-linux-uclibc-gcc" >> "$GITHUB_ENV"
+
+      - name: Configure vsftpd
+        working-directory: vsftpd-3.0.5
+        run: |
+          # Disable PAM and TCP wrappers.
+          sed -i 's/#define VSF_BUILD_PAM/#undef VSF_BUILD_PAM/' builddefs.h
+          sed -i 's/#define VSF_BUILD_TCPWRAPPERS/#undef VSF_BUILD_TCPWRAPPERS/' builddefs.h
+
+          # Disable SSL for a standalone build without OpenSSL dependency.
+          sed -i 's/#define VSF_BUILD_SSL/#undef VSF_BUILD_SSL/' builddefs.h
+
+      - name: Build vsftpd
+        working-directory: vsftpd-3.0.5
+        run: |
+          make clean
+
+          make -j$(nproc) \
             CC="$CC" \
-            LINK="$CC" \
-            CFLAGS="-O2 -Wall -fPIE -D_FORTIFY_SOURCE=2" \
-            LDFLAGS="-pie -Wl,--dynamic-linker=/lib/ld-uClibc.so.0"
-
-          test -f vsftpd
+            CFLAGS="-O2 -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -include fcntl.h -fno-strict-aliasing" \
+            LDFLAGS="-Wl,-z,relro -Wl,-z,now" \
+            LIBS="-lcrypt -lnsl" \
+            LINK="-Wl,-s" \
+            vsftpd
 
       - name: Verify binary
+        working-directory: vsftpd-3.0.5
         run: |
-          set -euo pipefail
+          file vsftpd
 
-          mkdir -p dist
-          install -m 755 vsftpd-3.0.5/vsftpd dist/vsftpd
+          ${CROSS_COMPILE}readelf -h vsftpd
 
-          {
-            echo "=== File format ==="
-            file dist/vsftpd
+          ${CROSS_COMPILE}readelf -l vsftpd || true
 
-            echo
-            echo "=== ELF header ==="
-            readelf -h dist/vsftpd
+          ${CROSS_COMPILE}readelf -d vsftpd || true
 
-            echo
-            echo "=== Interpreter ==="
-            readelf -l dist/vsftpd \
-              | grep -E 'INTERP|Requesting program interpreter' || true
+          mkdir -p ../release
+          cp vsftpd ../release/vsftpd-jiofiber-mips32r2
 
-            echo
-            echo "=== Shared libraries ==="
-            readelf -d dist/vsftpd | grep NEEDED || true
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG_NAME="vsftpd-$(date +%Y%m%d-%H%M%S)"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
-            echo
-            echo "=== Size ==="
-            ls -lh dist/vsftpd
-          } > dist/diagnostics.txt 2>&1
-
-          cat dist/diagnostics.txt
-
-          if readelf -h dist/vsftpd | grep -q 'little endian'; then
-            echo "ELF endian check passed."
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Create Release and Upload Binary
+        uses: softprops/action-gh-release@v2
         with:
-          name: vsftpd-jco4032-uclibc
-          path: dist/
-          retention-days: 7
-          if-no-files-found: error
+          files: |
+            release/vsftpd-jiofiber-mips32r2
+          name: JF-vsftpd 3.0.5
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          make_latest: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
